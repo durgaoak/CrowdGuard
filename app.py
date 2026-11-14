@@ -1461,6 +1461,7 @@ def process_uploaded_video(uploaded_video):
     output_path = None
     cap = None
     ffmpeg_process = None
+    processing_succeeded = False
 
     try:
         # Save uploaded video temporarily.
@@ -1490,7 +1491,7 @@ def process_uploaded_video(uploaded_video):
             st.error("Invalid video dimensions.")
             return
 
-        # Create an MP4 output file.
+        # Create an MP4 output file on disk for fast HTTP streaming.
         output_file = tempfile.NamedTemporaryFile(
             delete=False,
             suffix=".mp4"
@@ -1503,6 +1504,7 @@ def process_uploaded_video(uploaded_video):
         command = [
             ffmpeg_exe,
             "-y",
+            "-threads", "2",
             "-f", "rawvideo",
             "-vcodec", "rawvideo",
             "-pix_fmt", "bgr24",
@@ -1512,7 +1514,7 @@ def process_uploaded_video(uploaded_video):
             "-an",
             "-c:v", "libx264",
             "-preset", "ultrafast",
-            "-crf", "28",
+            "-crf", "26",
             "-pix_fmt", "yuv420p",
             "-vf", "pad=ceil(iw/2)*2:ceil(ih/2)*2",
             "-movflags", "+faststart",
@@ -1569,7 +1571,7 @@ def process_uploaded_video(uploaded_video):
                     tracker="bytetrack.yaml",
                     classes=[0],
                     conf=0.4,
-                    imgsz=640,
+                    imgsz=480,
                     verbose=False
                 )
 
@@ -1656,14 +1658,13 @@ def process_uploaded_video(uploaded_video):
 
             frame_number += 1
 
-            if total_frames > 0:
+            if total_frames > 0 and (frame_number % 5 == 0 or frame_number == total_frames):
                 progress.progress(
                     min(frame_number / total_frames, 1.0)
                 )
-
-            status.text(
-                f"Analysing frame {frame_number} of {total_frames}"
-            )
+                status.text(
+                    f"Analysing frame {frame_number} of {total_frames}"
+                )
 
         # Finish video encoding.
         cap.release()
@@ -1684,15 +1685,14 @@ def process_uploaded_video(uploaded_video):
         progress.progress(1.0)
         status.success("YOLO + ByteTrack + zone analytics completed!")
 
-        with open(output_path, "rb") as video_file:
-            processed_video = video_file.read()
-
         frame_df = pd.DataFrame(frame_log)
         person_df = pd.DataFrame(person_log)
         heatmap_image = build_presence_heatmap(person_df, background_frame)
 
+        processing_succeeded = True
+
         return {
-            "processed_video": processed_video,
+            "output_path": output_path,
             "latest_analytics": latest_analytics,
             "max_people": max_people,
             "unique_track_ids_count": len(unique_track_ids),
@@ -1724,17 +1724,22 @@ def process_uploaded_video(uploaded_video):
             except Exception:
                 pass
 
-        for path in [input_path, output_path]:
-            if path and os.path.exists(path):
-                try:
-                    os.remove(path)
-                except OSError:
-                    pass
+        if input_path and os.path.exists(input_path):
+            try:
+                os.remove(input_path)
+            except OSError:
+                pass
+
+        if not processing_succeeded and output_path and os.path.exists(output_path):
+            try:
+                os.remove(output_path)
+            except OSError:
+                pass
 
 
 def render_uploaded_video_report(results):
     """Render the full crowd analytics report from stored analysis results."""
-    processed_video = results["processed_video"]
+    processed_video = results.get("output_path") or results.get("processed_video")
     latest_analytics = results["latest_analytics"]
     max_people = results["max_people"]
     unique_track_ids_count = results["unique_track_ids_count"]
@@ -2127,17 +2132,29 @@ elif page == "Upload Video":
             else:
                 st.markdown("<div style='height:2.4rem'></div><span class='cg-ready'>✓ Video ready for analysis</span>", unsafe_allow_html=True)
                 with st.expander("Preview original video"):
-                    st.video(uploaded_video.getvalue())
+                    st.video(uploaded_video)
                 start_analysis = st.button("Start crowd analysis", type="primary", key="cg_btn_start_cctv")
                 st.caption("Tracking runs on every third frame to keep processing fast and efficient.")
 
     if uploaded_video is not None:
         video_signature = f"{uploaded_video.name}_{uploaded_video.size}"
         if st.session_state.get("uploaded_video_id") != video_signature:
+            old_results = st.session_state.get("uploaded_video_analysis")
+            if isinstance(old_results, dict) and old_results.get("output_path") and os.path.exists(old_results["output_path"]):
+                try:
+                    os.remove(old_results["output_path"])
+                except OSError:
+                    pass
             st.session_state["uploaded_video_id"] = video_signature
             st.session_state["uploaded_video_analysis"] = None
 
         if start_analysis:
+            old_results = st.session_state.get("uploaded_video_analysis")
+            if isinstance(old_results, dict) and old_results.get("output_path") and os.path.exists(old_results["output_path"]):
+                try:
+                    os.remove(old_results["output_path"])
+                except OSError:
+                    pass
             analysis_results = process_uploaded_video(uploaded_video)
             if analysis_results is not None:
                 st.session_state["uploaded_video_analysis"] = analysis_results
