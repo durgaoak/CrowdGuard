@@ -568,7 +568,7 @@ def get_inference_lock():
 
 
 @st.cache_resource(show_spinner=False)
-def start_model_warmup():
+# def start_model_warmup():
     """
     Load and warm up YOLO once per server process, in a background thread.
 
